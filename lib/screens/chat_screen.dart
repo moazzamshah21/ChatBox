@@ -1,5 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:pasteboard/pasteboard.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../models/chat_message.dart';
@@ -36,6 +42,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final MemoryService _memoryService = MemoryService();
   bool _isLoading = false;
   UserMemory _userMemory = const UserMemory();
+  String? _pendingImagePath;
+  late final ImagePicker _imagePicker;
 
   static const _brandy = Color(0xFFD4A574);
   static const _surfaceHigh = Color(0xFF2C2520);
@@ -58,6 +66,9 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _imagePicker = ImagePicker();
+    // Warm the image_picker platform channel (helps avoid channel-error on Android)
+    _imagePicker.retrieveLostData().then((_) {});
     _createNewConversation(widget.initialGameMode);
     _loadMemory();
   }
@@ -155,17 +166,32 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || _isLoading || _current == null) return;
+    final hasImage = _pendingImagePath != null && _pendingImagePath!.isNotEmpty;
+    if ((text.isEmpty && !hasImage) || _isLoading || _current == null) return;
 
     HapticFeedback.lightImpact();
     _controller.clear();
-    _current!.messages.add(ChatMessage(content: text, role: MessageRole.user));
-    if (_current!.title.isEmpty) _current!.title = text.length > 40 ? '${text.substring(0, 40)}...' : text;
+    final imagePath = _pendingImagePath;
+    setState(() => _pendingImagePath = null);
+
+    _current!.messages.add(ChatMessage(
+      content: text.isEmpty ? (hasImage ? '🖼 [Image]' : '') : text,
+      role: MessageRole.user,
+      imagePath: imagePath,
+    ));
+    if (_current!.title.isEmpty) {
+      _current!.title = text.isNotEmpty
+          ? (text.length > 40 ? '${text.substring(0, 40)}...' : text)
+          : '🖼 Photo';
+    }
     setState(() => _isLoading = true);
     _scrollToBottom();
 
     try {
+      // History for API: all messages except the one we just added (we send that one with optional image)
+      final messageCount = _current!.messages.length;
       final history = _current!.messages
+          .sublist(0, messageCount - 1)
           .map((m) => {
                 'role': m.role == MessageRole.user ? 'user' : 'assistant',
                 'content': m.content,
@@ -183,7 +209,17 @@ class _ChatScreenState extends State<ChatScreen> {
       ].where((s) => s.isNotEmpty).join(' ').trim();
       final system = systemPrompt.isEmpty ? null : systemPrompt;
 
-      final reply = await _openAI.sendMessage(text, history, systemPrompt: system);
+      final String reply;
+      if (imagePath != null) {
+        reply = await _openAI.sendMessageWithImage(
+          text,
+          imagePath,
+          history,
+          systemPrompt: system,
+        );
+      } else {
+        reply = await _openAI.sendMessage(text, history, systemPrompt: system);
+      }
 
       if (!mounted) return;
       _current!.messages.add(ChatMessage(content: reply, role: MessageRole.assistant));
@@ -207,6 +243,115 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
     });
+  }
+
+  void _showPhotoSourceSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _surfaceHigh,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Add photo',
+                style: TextStyle(
+                  color: _onSurface,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 20),
+              ListTile(
+                leading: const Icon(Icons.camera_alt_rounded, color: _brandy),
+                title: const Text('Take photo', style: TextStyle(color: _onSurface)),
+                onTap: () {
+                  Navigator.pop(context);
+                  WidgetsBinding.instance.addPostFrameCallback((_) => _pickImage(ImageSource.camera));
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library_rounded, color: _brandy),
+                title: const Text('Choose from gallery', style: TextStyle(color: _onSurface)),
+                onTap: () {
+                  Navigator.pop(context);
+                  WidgetsBinding.instance.addPostFrameCallback((_) => _pickImage(ImageSource.gallery));
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.content_paste_rounded, color: _brandy),
+                title: const Text('Paste from clipboard', style: TextStyle(color: _onSurface)),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pasteImage();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickImage(ImageSource source) async {
+    try {
+      final XFile? file = await _imagePicker.pickImage(
+        source: source,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 88,
+      );
+      if (file != null && mounted) {
+        setState(() => _pendingImagePath = file.path);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not get image: $e'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: _surfaceHigh,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _pasteImage() async {
+    try {
+      final imageBytes = await Pasteboard.image;
+      if (imageBytes == null || imageBytes.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No image in clipboard'),
+              behavior: SnackBarBehavior.floating,
+              backgroundColor: Color(0xFF2C2520),
+            ),
+          );
+        }
+        return;
+      }
+      final dir = await getTemporaryDirectory();
+      final path = p.join(dir.path, 'pasted_${DateTime.now().millisecondsSinceEpoch}.png');
+      await File(path).writeAsBytes(imageBytes);
+      if (mounted) setState(() => _pendingImagePath = path);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not paste image: $e'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: _surfaceHigh,
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -463,19 +608,33 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (isUser && msg.imagePath != null) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.file(
+                  File(msg.imagePath!),
+                  width: 220,
+                  height: 220,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              if (msg.content.isNotEmpty && msg.content != '🖼 [Image]') const SizedBox(height: 10),
+            ],
             for (final segment in segments)
               switch (segment) {
-                TextSegment(:final text) => Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: SelectableText(
-                        text,
-                        style: const TextStyle(
-                          color: _onSurface,
-                          fontSize: 15,
-                          height: 1.5,
+                TextSegment(:final text) => (text.isEmpty || (isUser && msg.imagePath != null && text.trim() == '🖼 [Image]'))
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: SelectableText(
+                          text,
+                          style: const TextStyle(
+                            color: _onSurface,
+                            fontSize: 15,
+                            height: 1.5,
+                          ),
                         ),
                       ),
-                    ),
                 CodeSegment(:final code, :final language) => CodeBlockView(
                       code: code,
                       language: language,
@@ -540,33 +699,87 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(
-            child: TextField(
-              controller: _controller,
-              decoration: const InputDecoration(
-                hintText: 'Message...',
-                hintStyle: TextStyle(color: Color(0xFF8B7B6A)),
+          if (_pendingImagePath != null) _buildPendingImagePreview(),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Material(
+                color: _surfaceHigh,
+                borderRadius: BorderRadius.circular(14),
+                child: InkWell(
+                  onTap: _isLoading ? null : _showPhotoSourceSheet,
+                  borderRadius: BorderRadius.circular(14),
+                  child: const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Icon(Icons.add_photo_alternate_rounded, color: _onSurfaceVariant, size: 24),
+                  ),
+                ),
               ),
-              style: const TextStyle(color: _onSurface, fontSize: 16),
-              textCapitalization: TextCapitalization.sentences,
-              maxLines: 4,
-              minLines: 1,
-              onSubmitted: (_) => _sendMessage(),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TextField(
+                  controller: _controller,
+                  decoration: const InputDecoration(
+                    hintText: 'Message...',
+                    hintStyle: TextStyle(color: Color(0xFF8B7B6A)),
+                  ),
+                  style: const TextStyle(color: _onSurface, fontSize: 16),
+                  textCapitalization: TextCapitalization.sentences,
+                  maxLines: 4,
+                  minLines: 1,
+                  onSubmitted: (_) => _sendMessage(),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Material(
+                color: _brandy,
+                borderRadius: BorderRadius.circular(14),
+                child: InkWell(
+                  onTap: _isLoading ? null : _sendMessage,
+                  borderRadius: BorderRadius.circular(14),
+                  child: const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Icon(Icons.send_rounded, color: Color(0xFF2C1810), size: 24),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPendingImagePreview() {
+    final path = _pendingImagePath!;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.file(
+              File(path),
+              height: 100,
+              width: 100,
+              fit: BoxFit.cover,
             ),
           ),
-          const SizedBox(width: 10),
-          Material(
-            color: _brandy,
-            borderRadius: BorderRadius.circular(14),
-            child: InkWell(
-              onTap: _isLoading ? null : _sendMessage,
-              borderRadius: BorderRadius.circular(14),
-              child: const Padding(
-                padding: EdgeInsets.all(12),
-                child: Icon(Icons.send_rounded, color: Color(0xFF2C1810), size: 24),
+          Positioned(
+            top: -6,
+            right: -6,
+            child: Material(
+              color: _surfaceHigh,
+              shape: const CircleBorder(),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: () => setState(() => _pendingImagePath = null),
+                child: const Padding(padding: EdgeInsets.all(6), child: Icon(Icons.close_rounded, size: 20, color: _onSurface)),
               ),
             ),
           ),
