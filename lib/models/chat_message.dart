@@ -3,7 +3,7 @@ enum MessageRole { user, assistant }
 class ChatMessage {
   final String content;
   final MessageRole role;
-  /// Local file path of attached image (user messages only). Used for display and for vision API.
+  /// Local file path: user = attached image (vision API); assistant = generated image.
   final String? imagePath;
 
   const ChatMessage({

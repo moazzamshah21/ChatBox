@@ -11,6 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 import '../models/user_memory.dart';
+import '../services/gemini_image_service.dart';
 import '../services/memory_service.dart';
 import '../services/openai_service.dart';
 import '../utils/context_detector.dart';
@@ -39,6 +40,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final OpenAIService _openAI = OpenAIService();
+  final GeminiImageService _geminiImage = GeminiImageService();
   final MemoryService _memoryService = MemoryService();
   bool _isLoading = false;
   UserMemory _userMemory = const UserMemory();
@@ -174,6 +176,44 @@ class _ChatScreenState extends State<ChatScreen> {
     final imagePath = _pendingImagePath;
     setState(() => _pendingImagePath = null);
 
+    // /img <prompt> → generate image with Gemini
+    if (text.startsWith('/img ')) {
+      final prompt = text.substring(5).trim();
+      if (prompt.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Enter a prompt after /img (e.g. /img a cat on a skateboard)'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: _surfaceHigh,
+          ),
+        );
+        return;
+      }
+      _current!.messages.add(ChatMessage(content: text, role: MessageRole.user));
+      if (_current!.title.isEmpty) {
+        _current!.title = prompt.length > 40 ? '${prompt.substring(0, 40)}...' : prompt;
+      }
+      setState(() => _isLoading = true);
+      _scrollToBottom();
+      try {
+        final generatedPath = await _geminiImage.textToImage(prompt);
+        if (!mounted) return;
+        _current!.messages.add(ChatMessage(
+          content: "Here's your generated image.",
+          role: MessageRole.assistant,
+          imagePath: generatedPath,
+        ));
+        setState(() => _isLoading = false);
+        _scrollToBottom();
+      } catch (e) {
+        if (!mounted) return;
+        _current!.messages.add(ChatMessage(content: 'Image generation failed: $e', role: MessageRole.assistant));
+        setState(() => _isLoading = false);
+        _scrollToBottom();
+      }
+      return;
+    }
+
     _current!.messages.add(ChatMessage(
       content: text.isEmpty ? (hasImage ? '🖼 [Image]' : '') : text,
       role: MessageRole.user,
@@ -228,6 +268,45 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       if (!mounted) return;
       _current!.messages.add(ChatMessage(content: 'Error: $e', role: MessageRole.assistant));
+      setState(() => _isLoading = false);
+      _scrollToBottom();
+    }
+  }
+
+  Future<void> _generateImage() async {
+    final prompt = _controller.text.trim();
+    if (prompt.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Describe the image you want to generate'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: _surfaceHigh,
+        ),
+      );
+      return;
+    }
+    if (_isLoading || _current == null) return;
+
+    HapticFeedback.lightImpact();
+    _controller.clear();
+    _current!.messages.add(ChatMessage(content: prompt, role: MessageRole.user));
+    if (_current!.title.isEmpty) _current!.title = prompt.length > 40 ? '${prompt.substring(0, 40)}...' : prompt;
+    setState(() => _isLoading = true);
+    _scrollToBottom();
+
+    try {
+      final imagePath = await _geminiImage.textToImage(prompt);
+      if (!mounted) return;
+      _current!.messages.add(ChatMessage(
+        content: "Here's your generated image.",
+        role: MessageRole.assistant,
+        imagePath: imagePath,
+      ));
+      setState(() => _isLoading = false);
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      _current!.messages.add(ChatMessage(content: 'Image generation failed: $e', role: MessageRole.assistant));
       setState(() => _isLoading = false);
       _scrollToBottom();
     }
@@ -608,7 +687,7 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (isUser && msg.imagePath != null) ...[
+            if (msg.imagePath != null) ...[
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image.file(
@@ -618,7 +697,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   fit: BoxFit.cover,
                 ),
               ),
-              if (msg.content.isNotEmpty && msg.content != '🖼 [Image]') const SizedBox(height: 10),
+              if (msg.content.isNotEmpty && (isUser ? msg.content != '🖼 [Image]' : true)) const SizedBox(height: 10),
             ],
             for (final segment in segments)
               switch (segment) {
@@ -716,6 +795,19 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: const Padding(
                     padding: EdgeInsets.all(12),
                     child: Icon(Icons.add_photo_alternate_rounded, color: _onSurfaceVariant, size: 24),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Material(
+                color: _surfaceHigh,
+                borderRadius: BorderRadius.circular(14),
+                child: InkWell(
+                  onTap: _isLoading ? null : _generateImage,
+                  borderRadius: BorderRadius.circular(14),
+                  child: const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Icon(Icons.auto_awesome, color: _onSurfaceVariant, size: 24),
                   ),
                 ),
               ),
