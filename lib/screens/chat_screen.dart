@@ -3,9 +3,13 @@ import 'package:share_plus/share_plus.dart';
 
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
+import '../models/user_memory.dart';
+import '../services/memory_service.dart';
 import '../services/openai_service.dart';
+import '../utils/context_detector.dart';
 import '../utils/message_content_parser.dart';
 import '../widgets/code_block_view.dart';
+import 'memory_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -21,7 +25,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final OpenAIService _openAI = OpenAIService();
+  final MemoryService _memoryService = MemoryService();
   bool _isLoading = false;
+  UserMemory _userMemory = const UserMemory();
 
   static const _brandy = Color(0xFFD4A574);
   static const _surfaceHigh = Color(0xFF2C2520);
@@ -45,6 +51,13 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _createNewConversation();
+    _loadMemory();
+  }
+
+  Future<void> _loadMemory() async {
+    final m = await _memoryService.load();
+    if (!mounted) return;
+    setState(() => _userMemory = m);
   }
 
   @override
@@ -150,7 +163,16 @@ class _ChatScreenState extends State<ChatScreen> {
               })
           .toList();
 
-      final reply = await _openAI.sendMessage(text, history);
+      final tone = detectTone(text);
+      final toneHint = toneSystemPrompt(tone);
+      final memorySummary = _userMemory.toSystemPromptSummary();
+      final systemPrompt = [
+        if (memorySummary.isNotEmpty) memorySummary,
+        if (toneHint.isNotEmpty) toneHint,
+      ].join(' ').trim();
+      final system = systemPrompt.isEmpty ? null : systemPrompt;
+
+      final reply = await _openAI.sendMessage(text, history, systemPrompt: system);
 
       if (!mounted) return;
       _current!.messages.add(ChatMessage(content: reply, role: MessageRole.assistant));
@@ -226,6 +248,7 @@ class _ChatScreenState extends State<ChatScreen> {
       drawer: _buildDrawer(),
       body: Column(
         children: [
+          if (_userMemory.memoryChips.isNotEmpty) _buildMemoryChips(),
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
@@ -241,6 +264,43 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           _buildInputBar(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildMemoryChips() {
+    final chips = _userMemory.memoryChips;
+    if (chips.isEmpty) return const SizedBox.shrink();
+    return Container(
+      height: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: _surfaceHigh.withOpacity(0.6),
+        border: Border(bottom: BorderSide(color: _surfaceHigh)),
+      ),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: chips.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final label = chips[index];
+          return Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              constraints: const BoxConstraints(maxWidth: 280),
+              decoration: BoxDecoration(
+                color: _userBubble.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text(
+                label,
+                style: const TextStyle(color: _onSurface, fontSize: 12),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -269,6 +329,20 @@ class _ChatScreenState extends State<ChatScreen> {
               onTap: () {
                 _createNewConversation();
                 Navigator.of(context).pop();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.psychology_rounded, color: _onSurfaceVariant),
+              title: const Text('Your memory', style: TextStyle(color: _onSurface)),
+              subtitle: _userMemory.isEmpty
+                  ? null
+                  : Text(
+                      '${_userMemory.memoryChips.length} thing(s) remembered',
+                      style: const TextStyle(color: _onSurfaceVariant, fontSize: 12),
+                    ),
+              onTap: () {
+                Navigator.of(context).pop();
+                Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MemoryScreen())).then((_) => _loadMemory());
               },
             ),
             const Divider(color: Color(0xFF3D342C)),

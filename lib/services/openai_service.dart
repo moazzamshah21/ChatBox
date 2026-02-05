@@ -12,15 +12,23 @@ class OpenAIService {
     return _apiKey ?? '';
   }
 
-  Future<String> sendMessage(String userMessage, List<Map<String, String>> history) async {
+  /// [systemPrompt] is optional. When set, it's sent as the system message so the AI
+  /// can adjust tone (e.g. soft, technical, playful) and use user memory.
+  Future<String> sendMessage(
+    String userMessage,
+    List<Map<String, String>> history, {
+    String? systemPrompt,
+  }) async {
     if (apiKey.isEmpty) {
       throw Exception('OPENAI_API_KEY not found. Add it to your .env file.');
     }
 
-    final messages = [
-      ...history,
-      {'role': 'user', 'content': userMessage},
-    ];
+    final messageMaps = <Map<String, String>>[];
+    if (systemPrompt != null && systemPrompt.trim().isNotEmpty) {
+      messageMaps.add({'role': 'system', 'content': systemPrompt.trim()});
+    }
+    messageMaps.addAll(history);
+    messageMaps.add({'role': 'user', 'content': userMessage});
 
     final response = await http.post(
       Uri.parse(_baseUrl),
@@ -30,7 +38,7 @@ class OpenAIService {
       },
       body: jsonEncode({
         'model': 'gpt-3.5-turbo',
-        'messages': messages.map((m) => {'role': m['role'], 'content': m['content']}).toList(),
+        'messages': messageMaps.map((m) => {'role': m['role'], 'content': m['content']}).toList(),
       }),
     );
 
