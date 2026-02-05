@@ -1,4 +1,5 @@
 import 'chat_message.dart';
+import 'game_mode.dart';
 
 class Conversation {
   Conversation({
@@ -6,6 +7,7 @@ class Conversation {
     required this.title,
     List<ChatMessage>? messages,
     DateTime? createdAt,
+    this.gameMode,
   })  : messages = messages ?? [],
         createdAt = createdAt ?? DateTime.now();
 
@@ -13,8 +15,10 @@ class Conversation {
   String title;
   final List<ChatMessage> messages;
   final DateTime createdAt;
+  final GameMode? gameMode;
 
   String get titleOrPreview {
+    if (gameMode != null) return '🎮 ${gameMode!.displayName}';
     if (title.isNotEmpty) return title;
     for (final m in messages) {
       if (m.role == MessageRole.user && m.content.isNotEmpty) {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../models/chat_message.dart';
@@ -8,11 +9,18 @@ import '../services/memory_service.dart';
 import '../services/openai_service.dart';
 import '../utils/context_detector.dart';
 import '../utils/message_content_parser.dart';
+import '../widgets/ai_avatar.dart';
 import '../widgets/code_block_view.dart';
+import '../widgets/message_reveal.dart';
+import '../widgets/typing_indicator.dart';
+import '../models/game_mode.dart';
+import 'game_mode_screen.dart';
 import 'memory_screen.dart';
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
+  const ChatScreen({super.key, this.initialGameMode});
+
+  final GameMode? initialGameMode;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -50,7 +58,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _createNewConversation();
+    _createNewConversation(widget.initialGameMode);
     _loadMemory();
   }
 
@@ -67,10 +75,10 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  void _createNewConversation() {
+  void _createNewConversation([GameMode? gameMode]) {
     final id = 'conv_${DateTime.now().millisecondsSinceEpoch}';
     setState(() {
-      _conversations.insert(0, Conversation(id: id, title: ''));
+      _conversations.insert(0, Conversation(id: id, title: gameMode != null ? '🎮 ${gameMode.displayName}' : '', gameMode: gameMode));
       _currentId = id;
     });
   }
@@ -149,6 +157,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _controller.text.trim();
     if (text.isEmpty || _isLoading || _current == null) return;
 
+    HapticFeedback.lightImpact();
     _controller.clear();
     _current!.messages.add(ChatMessage(content: text, role: MessageRole.user));
     if (_current!.title.isEmpty) _current!.title = text.length > 40 ? '${text.substring(0, 40)}...' : text;
@@ -166,10 +175,12 @@ class _ChatScreenState extends State<ChatScreen> {
       final tone = detectTone(text);
       final toneHint = toneSystemPrompt(tone);
       final memorySummary = _userMemory.toSystemPromptSummary();
+      final gamePrompt = _current!.gameMode?.systemPrompt;
       final systemPrompt = [
+        if (gamePrompt != null) gamePrompt,
         if (memorySummary.isNotEmpty) memorySummary,
         if (toneHint.isNotEmpty) toneHint,
-      ].join(' ').trim();
+      ].where((s) => s.isNotEmpty).join(' ').trim();
       final system = systemPrompt.isEmpty ? null : systemPrompt;
 
       final reply = await _openAI.sendMessage(text, history, systemPrompt: system);
@@ -207,13 +218,11 @@ class _ChatScreenState extends State<ChatScreen> {
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: _userBubble,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Icon(Icons.smart_toy_rounded, color: _brandy, size: 22),
+            AiAvatar(
+              isThinking: _isLoading,
+              size: 34,
+              brandy: _brandy,
+              background: _userBubble,
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -258,7 +267,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 if (index == _messages.length) {
                   return _buildLoadingBubble();
                 }
-                return _buildMessageBubble(_messages[index]);
+                final msg = _messages[index];
+                return MessageReveal(
+                  key: ValueKey('${msg.role}_${msg.content.hashCode}_$index'),
+                  child: _buildMessageBubble(msg),
+                );
               },
             ),
           ),
@@ -345,6 +358,28 @@ class _ChatScreenState extends State<ChatScreen> {
                 Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MemoryScreen())).then((_) => _loadMemory());
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.sports_esports_rounded, color: _onSurfaceVariant),
+              title: const Text('🎮 Game mode', style: TextStyle(color: _onSurface)),
+              subtitle: const Text(
+                '20 Questions, Guess the word, Would You Rather',
+                style: TextStyle(color: _onSurfaceVariant, fontSize: 12),
+              ),
+              onTap: () {
+                Navigator.of(context).pop();
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => GameModeScreen(
+                    onSelectGame: (mode) {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => ChatScreen(initialGameMode: mode),
+                        ),
+                      );
+                    },
+                  ),
+                ));
+              },
+            ),
             const Divider(color: Color(0xFF3D342C)),
             Expanded(
               child: ListView.builder(
@@ -401,8 +436,16 @@ class _ChatScreenState extends State<ChatScreen> {
                   end: Alignment.bottomLeft,
                   colors: [_userBubble, const Color(0xFF3D2E24)],
                 )
-              : null,
-          color: isUser ? null : _surfaceHigh,
+              : LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    _surfaceHigh,
+                    const Color(0xFF352C26),
+                    const Color(0xFF2A221D),
+                  ],
+                ),
+          color: null,
           borderRadius: BorderRadius.only(
             topLeft: const Radius.circular(20),
             topRight: const Radius.circular(20),
@@ -452,7 +495,14 @@ class _ChatScreenState extends State<ChatScreen> {
         margin: const EdgeInsets.only(bottom: 14),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
         decoration: BoxDecoration(
-          color: _surfaceHigh,
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              _surfaceHigh,
+              const Color(0xFF352C26),
+            ],
+          ),
           borderRadius: const BorderRadius.only(
             topLeft: Radius.circular(20),
             topRight: Radius.circular(20),
@@ -463,22 +513,9 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: _brandy,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Text(
-              'Thinking...',
-              style: TextStyle(
-                color: _onSurfaceVariant,
-                fontSize: 14,
-              ),
-            ),
+            AiAvatar(isThinking: true, size: 28, brandy: _brandy, background: _userBubble),
+            const SizedBox(width: 14),
+            TypingIndicator(brandy: _brandy, onSurfaceVariant: _onSurfaceVariant),
           ],
         ),
       ),
